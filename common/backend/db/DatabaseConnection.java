@@ -57,29 +57,20 @@ public class DatabaseConnection {
         }
 
         // 1. Check Primary Configured Connection (from db.properties)
-        String primaryDriver = props.getProperty("db.driver", "com.mysql.cj.jdbc.Driver");
-        String primaryUrl = props.getProperty("db.url", "jdbc:mysql://localhost:3306/boat_safari_db?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&characterEncoding=UTF-8");
-        String primaryUser = props.getProperty("db.username", "root");
-        String primaryPass = props.getProperty("db.password", "0000");
+        String primaryDriver = props.getProperty("db.driver", "com.microsoft.sqlserver.jdbc.SQLServerDriver");
+        String primaryUrl = props.getProperty("db.url", "jdbc:sqlserver://localhost:1433;databaseName=boat_safari_db;user=boat_safari_user;password=BoatSafari@2026;encrypt=true;trustServerCertificate=true;loginTimeout=5;");
+        String primaryUser = props.getProperty("db.username", "boat_safari_user");
+        String primaryPass = props.getProperty("db.password", "BoatSafari@2026");
 
-        if (tryConnect(primaryDriver, primaryUrl, primaryUser, primaryPass, primaryDriver.contains("mysql") ? "MySQL 8.0" : "Primary Database")) {
+        String primaryLabel = primaryDriver.contains("sqlserver") ? "Microsoft SQL Server (Primary)" : (primaryDriver.contains("mysql") ? "MySQL 8.0" : "Primary Database");
+        if (tryConnect(primaryDriver, primaryUrl, primaryUser, primaryPass, primaryLabel)) {
             return;
         }
 
-        // 2. Check MySQL Explicit Configuration
-        String mysqlDriver = props.getProperty("db.mysql.driver", "com.mysql.cj.jdbc.Driver");
-        String mysqlUrl = props.getProperty("db.mysql.url", "jdbc:mysql://localhost:3306/boat_safari_db?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&characterEncoding=UTF-8");
-        String mysqlUser = props.getProperty("db.mysql.username", "root");
-        String mysqlPass = props.getProperty("db.mysql.password", "0000");
-
-        if (tryConnect(mysqlDriver, mysqlUrl, mysqlUser, mysqlPass, "MySQL 8.0")) {
-            return;
-        }
-
-        // 3. Check Microsoft SQL Server (Alternative fallback)
+        // 2. Check Microsoft SQL Server (Direct Port 1433 & Named Instance)
         String mssqlDriver = props.getProperty("db.mssql.driver", "com.microsoft.sqlserver.jdbc.SQLServerDriver");
-        String mssqlUrl1 = props.getProperty("db.mssql.url", "jdbc:sqlserver://localhost:1433;databaseName=boat_safari_db;user=boat_safari_user;password=BoatSafari@2026;encrypt=true;trustServerCertificate=true;");
-        String mssqlUrl2 = props.getProperty("db.mssql.namedUrl", "jdbc:sqlserver://localhost;instanceName=SQLEXPRESS;databaseName=boat_safari_db;user=boat_safari_user;password=BoatSafari@2026;encrypt=true;trustServerCertificate=true;");
+        String mssqlUrl1 = props.getProperty("db.mssql.url", "jdbc:sqlserver://localhost:1433;databaseName=boat_safari_db;user=boat_safari_user;password=BoatSafari@2026;encrypt=true;trustServerCertificate=true;loginTimeout=5;");
+        String mssqlUrl2 = props.getProperty("db.mssql.namedUrl", "jdbc:sqlserver://localhost;instanceName=SQLEXPRESS;databaseName=boat_safari_db;user=boat_safari_user;password=BoatSafari@2026;encrypt=true;trustServerCertificate=true;loginTimeout=5;");
         String mssqlUser = props.getProperty("db.mssql.username", "boat_safari_user");
         String mssqlPass = props.getProperty("db.mssql.password", "BoatSafari@2026");
 
@@ -88,6 +79,16 @@ public class DatabaseConnection {
         }
 
         if (tryConnect(mssqlDriver, mssqlUrl2, mssqlUser, mssqlPass, "Microsoft SQL Server (SQLEXPRESS Instance)")) {
+            return;
+        }
+
+        // 3. Check MySQL Secondary Fallback
+        String mysqlDriver = props.getProperty("db.mysql.driver", "com.mysql.cj.jdbc.Driver");
+        String mysqlUrl = props.getProperty("db.mysql.url", "jdbc:mysql://localhost:3306/boat_safari_db?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&characterEncoding=UTF-8");
+        String mysqlUser = props.getProperty("db.mysql.username", "root");
+        String mysqlPass = props.getProperty("db.mysql.password", "0000");
+
+        if (tryConnect(mysqlDriver, mysqlUrl, mysqlUser, mysqlPass, "MySQL 8.0")) {
             return;
         }
 
@@ -120,8 +121,10 @@ public class DatabaseConnection {
         return false;
     }
 
+    private final java.util.concurrent.BlockingQueue<Connection> connectionPool = new java.util.concurrent.LinkedBlockingQueue<>(10);
+
     /**
-     * Obtains a live JDBC Connection.
+     * Obtains a live JDBC Connection from pool or creates a new one.
      * @return Connection object
      * @throws SQLException if a database access error occurs
      */
@@ -129,10 +132,40 @@ public class DatabaseConnection {
         if (!isAvailable) {
             throw new SQLException("No active physical database connection. In-memory store active.");
         }
-        if (username != null && !username.isEmpty()) {
-            return DriverManager.getConnection(this.url, this.username, this.password);
+        Connection pooled = connectionPool.poll();
+        if (pooled != null) {
+            try {
+                if (!pooled.isClosed() && pooled.isValid(1)) {
+                    return wrapConnection(pooled);
+                }
+            } catch (SQLException ignored) {
+                // Stale connection, discard and recreate
+            }
         }
-        return DriverManager.getConnection(this.url);
+        Connection physical = (username != null && !username.isEmpty())
+                ? DriverManager.getConnection(this.url, this.username, this.password)
+                : DriverManager.getConnection(this.url);
+        return wrapConnection(physical);
+    }
+
+    private Connection wrapConnection(Connection physical) {
+        return (Connection) java.lang.reflect.Proxy.newProxyInstance(
+                Connection.class.getClassLoader(),
+                new Class<?>[]{Connection.class},
+                (proxy, method, args) -> {
+                    if ("close".equals(method.getName())) {
+                        if (!physical.isClosed() && connectionPool.size() < 10) {
+                            connectionPool.offer(physical);
+                            return null;
+                        }
+                    }
+                    try {
+                        return method.invoke(physical, args);
+                    } catch (java.lang.reflect.InvocationTargetException ite) {
+                        throw ite.getCause() != null ? ite.getCause() : ite;
+                    }
+                }
+        );
     }
 
     public boolean isDatabaseAvailable() {
