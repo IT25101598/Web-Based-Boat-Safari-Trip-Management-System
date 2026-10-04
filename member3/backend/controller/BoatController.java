@@ -110,17 +110,11 @@ public class BoatController extends BaseController {
         // ==========================================
         if ("/admin/boats/delete".equals(path)) {
             int deleteId = getIntParam(request, "id", 0);
-            List<com.boatsafari.member1.model.TourSchedule> conflicts = boatService.checkVesselScheduleConflicts(deleteId);
-            if (!conflicts.isEmpty()) {
-                flashError(request, "Cannot delete vessel: It is assigned to " + conflicts.size() + " active scheduled tour departure(s). Reassign or cancel those departures first.");
-                redirect(response, request.getContextPath() + "/admin/boats");
-                return;
-            }
             boolean deleted = boatService.deleteVessel(deleteId);
             if (deleted) {
-                flashSuccess(request, "Vessel removed from active fleet registry.");
+                flashSuccess(request, "Vessel #" + deleteId + " and its records were removed from the fleet registry.");
             } else {
-                flashError(request, "Unable to delete vessel. It may have associated historical records or does not exist.");
+                flashError(request, "Unable to delete vessel. It does not exist.");
             }
             redirect(response, request.getContextPath() + "/admin/boats");
             return;
