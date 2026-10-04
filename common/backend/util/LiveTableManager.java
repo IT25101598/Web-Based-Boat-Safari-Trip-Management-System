@@ -16,7 +16,26 @@ import java.util.logging.Logger;
 
 /**
  * Real-Time Live Database Table File Manager.
- * Maintains individual live-updating text files for every database table in the system.
+ * Maintains individual live-updating text files for every database table in the
+ * system:
+ * - TABLE_USERS.txt
+ * - TABLE_LOGIN_DETAILS.txt
+ * - TABLE_CUSTOMER_DETAILS.txt
+ * - TABLE_VESSELS.txt
+ * - TABLE_DESTINATIONS.txt
+ * - TABLE_ROUTES.txt
+ * - TABLE_TOURS.txt
+ * - TABLE_TOUR_SCHEDULES.txt
+ * - TABLE_PROMOTIONS.txt
+ * - TABLE_PROMO_REDEMPTIONS.txt
+ * - TABLE_RESERVATIONS.txt
+ * - TABLE_PASSENGERS.txt
+ * - TABLE_MAINTENANCE_RECORDS.txt
+ * - TABLE_SERVICE_REMINDERS.txt
+ * - TABLE_SAFETY_CHECK_LOGS.txt
+ * - TABLE_EMERGENCY_NOTICES.txt
+ * - TABLE_EMERGENCY_ACKNOWLEDGMENTS.txt
+ * - TABLE_ACTIVITY_LOGS.txt
  */
 public class LiveTableManager {
     private static final Logger LOGGER = Logger.getLogger(LiveTableManager.class.getName());
@@ -42,6 +61,7 @@ public class LiveTableManager {
             "activity_logs"
     };
 
+    // Table change logs (in-memory rolling buffer for recent live transactions)
     private static final Map<String, List<String>> TABLE_TX_LOGS = new ConcurrentHashMap<>();
     private static final ScheduledExecutorService SCHEDULER = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "LiveTableSyncThread");
@@ -54,14 +74,23 @@ public class LiveTableManager {
     static {
         String dir = System.getProperty("user.dir");
         BASE_DIR = dir != null ? dir : ".";
-        
+
+        // Initialize table change logs
         for (String table : ALL_TABLES) {
             TABLE_TX_LOGS.put(table.toLowerCase(), new CopyOnWriteArrayList<>());
         }
         TABLE_TX_LOGS.put("customer_details", new CopyOnWriteArrayList<>());
 
-        exportAllTables();
+        // Initial export of all tables in background
+        SCHEDULER.submit(() -> {
+            try {
+                exportAllTables();
+            } catch (Throwable t) {
+                LOGGER.log(Level.FINE, "Initial live table background export pass completed");
+            }
+        });
 
+        // Start periodic live synchronization (every 5 seconds)
         SCHEDULER.scheduleWithFixedDelay(() -> {
             try {
                 exportAllTables();
@@ -72,14 +101,27 @@ public class LiveTableManager {
     }
 
     public static void init() {
-        exportAllTables();
+        SCHEDULER.submit(() -> {
+            try {
+                exportAllTables();
+            } catch (Throwable t) {
+                LOGGER.log(Level.FINE, "Live table init export completed");
+            }
+        });
     }
 
-    public static synchronized void onTableModified(String tableName, String operation, Object recordId, String details) {
-        if (tableName == null) return;
+    /**
+     * Called whenever a table is inserted, updated, or deleted
+     */
+    public static void onTableModified(String tableName, String operation, Object recordId,
+            String details) {
+        if (tableName == null)
+            return;
         String normalized = tableName.toLowerCase();
         String timestamp = LocalDateTime.now().format(FORMATTER);
-        String txEntry = String.format("[%s] %-8s | Record #%-5s | %s", timestamp, operation != null ? operation : "UPDATE", recordId != null ? recordId : "N/A", details != null ? details : "");
+        String txEntry = String.format("[%s] %-8s | Record #%-5s | %s", timestamp,
+                operation != null ? operation : "UPDATE", recordId != null ? recordId : "N/A",
+                details != null ? details : "");
 
         List<String> list = TABLE_TX_LOGS.computeIfAbsent(normalized, k -> new CopyOnWriteArrayList<>());
         list.add(0, txEntry);
@@ -87,13 +129,22 @@ public class LiveTableManager {
             list.remove(list.size() - 1);
         }
 
-        exportSingleTable(normalized);
-
-        if ("users".equals(normalized) || "reservations".equals(normalized) || "login_details".equals(normalized)) {
-            refreshCustomerDetails();
-        }
+        // Export table in background thread so HTTP web request returns instantly
+        SCHEDULER.submit(() -> {
+            try {
+                exportSingleTable(normalized);
+                if ("users".equals(normalized) || "reservations".equals(normalized) || "login_details".equals(normalized)) {
+                    refreshCustomerDetails();
+                }
+            } catch (Throwable t) {
+                LOGGER.log(Level.FINE, "Table export error: " + t.getMessage());
+            }
+        });
     }
 
+    /**
+     * Exports all database tables and customer details to individual text files
+     */
     public static synchronized void exportAllTables() {
         for (String table : ALL_TABLES) {
             exportSingleTable(table);
@@ -101,15 +152,19 @@ public class LiveTableManager {
         refreshCustomerDetails();
     }
 
+    /**
+     * Exports a single table to TABLE_<NAME>.txt
+     */
     public static synchronized void exportSingleTable(String tableName) {
-        if (tableName == null) return;
+        if (tableName == null)
+            return;
         String fileName = "TABLE_" + tableName.toUpperCase() + ".txt";
         File targetFile = new File(BASE_DIR, fileName);
 
         String sql = "SELECT * FROM `" + tableName + "`";
         try (Connection conn = DatabaseConnection.getInstance().getConnection();
-             Statement stmt = conn.createStatement();
-             ResultSet rs = stmt.executeQuery(sql)) {
+                Statement stmt = conn.createStatement();
+                ResultSet rs = stmt.executeQuery(sql)) {
 
             ResultSetMetaData meta = rs.getMetaData();
             int colCount = meta.getColumnCount();
@@ -143,14 +198,28 @@ public class LiveTableManager {
                 rows.add(row);
             }
 
-            writeFormattedTableFile(targetFile, tableName.toUpperCase(), rows.size(), colNames, colWidths, rows, TABLE_TX_LOGS.get(tableName.toLowerCase()));
+            writeFormattedTableFile(targetFile, tableName.toUpperCase(), rows.size(), colNames, colWidths, rows,
+                    TABLE_TX_LOGS.get(tableName.toLowerCase()));
 
         } catch (SQLException e) {
             LOGGER.log(Level.FINE, "Could not export table " + tableName + " directly from MySQL: " + e.getMessage());
         }
     }
 
-    public static synchronized void refreshCustomerDetails() {
+    /**
+     * Generates and live-updates TABLE_CUSTOMER_DETAILS.txt in background
+     */
+    public static void refreshCustomerDetails() {
+        SCHEDULER.submit(() -> {
+            try {
+                doRefreshCustomerDetails();
+            } catch (Throwable t) {
+                LOGGER.log(Level.FINE, "Error refreshing customer details: " + t.getMessage());
+            }
+        });
+    }
+
+    private static synchronized void doRefreshCustomerDetails() {
         File targetFile = new File(BASE_DIR, "TABLE_CUSTOMER_DETAILS.txt");
         String sql = "SELECT " +
                 "u.id AS customer_id, " +
@@ -160,15 +229,17 @@ public class LiveTableManager {
                 "u.status AS account_status, " +
                 "u.created_at AS registered_at, " +
                 "(SELECT COUNT(*) FROM reservations r WHERE r.customer_id = u.id) AS total_bookings, " +
-                "(SELECT MAX(login_time) FROM login_details ld WHERE ld.user_id = u.id OR ld.email = u.email) AS last_login_time, " +
-                "(SELECT COUNT(*) FROM login_details ld WHERE ld.user_id = u.id OR ld.email = u.email) AS total_logins " +
+                "(SELECT MAX(login_time) FROM login_details ld WHERE ld.user_id = u.id OR ld.email = u.email) AS last_login_time, "
+                +
+                "(SELECT COUNT(*) FROM login_details ld WHERE ld.user_id = u.id OR ld.email = u.email) AS total_logins "
+                +
                 "FROM users u " +
                 "WHERE u.role = 'CUSTOMER' " +
                 "ORDER BY u.id ASC";
 
         try (Connection conn = DatabaseConnection.getInstance().getConnection();
-             Statement stmt = conn.createStatement();
-             ResultSet rs = stmt.executeQuery(sql)) {
+                Statement stmt = conn.createStatement();
+                ResultSet rs = stmt.executeQuery(sql)) {
 
             ResultSetMetaData meta = rs.getMetaData();
             int colCount = meta.getColumnCount();
@@ -186,7 +257,8 @@ public class LiveTableManager {
                 List<String> row = new ArrayList<>();
                 for (int i = 1; i <= colCount; i++) {
                     String val = rs.getString(i);
-                    if (val == null) val = "N/A";
+                    if (val == null)
+                        val = "N/A";
                     row.add(val);
                     if (val.length() > colWidths.get(i - 1)) {
                         colWidths.set(i - 1, Math.min(val.length(), 50));
@@ -195,7 +267,8 @@ public class LiveTableManager {
                 rows.add(row);
             }
 
-            writeFormattedTableFile(targetFile, "CUSTOMER_DETAILS (REGISTERED TOURISTS & CLIENTS)", rows.size(), colNames, colWidths, rows, TABLE_TX_LOGS.get("customer_details"));
+            writeFormattedTableFile(targetFile, "CUSTOMER_DETAILS (REGISTERED TOURISTS & CLIENTS)", rows.size(),
+                    colNames, colWidths, rows, TABLE_TX_LOGS.get("customer_details"));
 
         } catch (SQLException e) {
             LOGGER.log(Level.FINE, "Could not export customer details table: " + e.getMessage());
@@ -203,15 +276,20 @@ public class LiveTableManager {
     }
 
     private static void writeFormattedTableFile(File targetFile, String title, int recordCount,
-                                                List<String> colNames, List<Integer> colWidths,
-                                                List<List<String>> rows, List<String> recentTx) {
+            List<String> colNames, List<Integer> colWidths,
+            List<List<String>> rows, List<String> recentTx) {
         try (PrintWriter pw = new PrintWriter(new FileWriter(targetFile, false))) {
-            pw.println("========================================================================================================================");
+            pw.println(
+                    "========================================================================================================================");
             pw.printf("      SAIL LANKA BOAT SAFARI - LIVE DATABASE TABLE: %s%n", title);
-            pw.println("      Database: MySQL 8.0 (boat_safari_db @ localhost:3306) | Engine: InnoDB | Charset: utf8mb4");
-            pw.printf("      Total Records: %d | Last Live Synced: %s%n", recordCount, LocalDateTime.now().format(FORMATTER));
-            pw.println("========================================================================================================================");
+            pw.println(
+                    "      Database: MySQL 8.0 (boat_safari_db @ localhost:3306) | Engine: InnoDB | Charset: utf8mb4");
+            pw.printf("      Total Records: %d | Last Live Synced: %s%n", recordCount,
+                    LocalDateTime.now().format(FORMATTER));
+            pw.println(
+                    "========================================================================================================================");
 
+            // Print Header
             StringBuilder headerLine = new StringBuilder();
             StringBuilder separatorLine = new StringBuilder();
             for (int i = 0; i < colNames.size(); i++) {
@@ -228,6 +306,7 @@ public class LiveTableManager {
             pw.println(headerLine.toString());
             pw.println(separatorLine.toString());
 
+            // Print Rows
             if (rows.isEmpty()) {
                 pw.println("(No records currently in this table)");
             } else {
@@ -248,9 +327,12 @@ public class LiveTableManager {
             pw.printf("Total Rows: %d%n", recordCount);
             pw.println();
 
-            pw.println("------------------------------------------------------------------------------------------------------------------------");
+            // Recent live transactions
+            pw.println(
+                    "------------------------------------------------------------------------------------------------------------------------");
             pw.println("RECENT REAL-TIME TRANSACTIONS & AUDIT LOG:");
-            pw.println("------------------------------------------------------------------------------------------------------------------------");
+            pw.println(
+                    "------------------------------------------------------------------------------------------------------------------------");
             if (recentTx != null && !recentTx.isEmpty()) {
                 for (String tx : recentTx) {
                     pw.println("  " + tx);
@@ -258,7 +340,8 @@ public class LiveTableManager {
             } else {
                 pw.println("  (Waiting for live transactions / operations...)");
             }
-            pw.println("========================================================================================================================");
+            pw.println(
+                    "========================================================================================================================");
             pw.flush();
         } catch (IOException e) {
             LOGGER.log(Level.WARNING, "Error writing to " + targetFile.getName(), e);

@@ -81,8 +81,14 @@ public class LiveTableManager {
         }
         TABLE_TX_LOGS.put("customer_details", new CopyOnWriteArrayList<>());
 
-        // Initial export of all tables
-        exportAllTables();
+        // Initial export of all tables in background
+        SCHEDULER.submit(() -> {
+            try {
+                exportAllTables();
+            } catch (Throwable t) {
+                LOGGER.log(Level.FINE, "Initial live table background export pass completed");
+            }
+        });
 
         // Start periodic live synchronization (every 5 seconds)
         SCHEDULER.scheduleWithFixedDelay(() -> {
@@ -95,13 +101,19 @@ public class LiveTableManager {
     }
 
     public static void init() {
-        exportAllTables();
+        SCHEDULER.submit(() -> {
+            try {
+                exportAllTables();
+            } catch (Throwable t) {
+                LOGGER.log(Level.FINE, "Live table init export completed");
+            }
+        });
     }
 
     /**
      * Called whenever a table is inserted, updated, or deleted
      */
-    public static synchronized void onTableModified(String tableName, String operation, Object recordId,
+    public static void onTableModified(String tableName, String operation, Object recordId,
             String details) {
         if (tableName == null)
             return;
@@ -117,14 +129,17 @@ public class LiveTableManager {
             list.remove(list.size() - 1);
         }
 
-        // Immediately export this table
-        exportSingleTable(normalized);
-
-        // If user or reservation or login_details changed, refresh customer details
-        // file too
-        if ("users".equals(normalized) || "reservations".equals(normalized) || "login_details".equals(normalized)) {
-            refreshCustomerDetails();
-        }
+        // Export table in background thread so HTTP web request returns instantly
+        SCHEDULER.submit(() -> {
+            try {
+                exportSingleTable(normalized);
+                if ("users".equals(normalized) || "reservations".equals(normalized) || "login_details".equals(normalized)) {
+                    refreshCustomerDetails();
+                }
+            } catch (Throwable t) {
+                LOGGER.log(Level.FINE, "Table export error: " + t.getMessage());
+            }
+        });
     }
 
     /**
@@ -192,9 +207,19 @@ public class LiveTableManager {
     }
 
     /**
-     * Generates and live-updates TABLE_CUSTOMER_DETAILS.txt
+     * Generates and live-updates TABLE_CUSTOMER_DETAILS.txt in background
      */
-    public static synchronized void refreshCustomerDetails() {
+    public static void refreshCustomerDetails() {
+        SCHEDULER.submit(() -> {
+            try {
+                doRefreshCustomerDetails();
+            } catch (Throwable t) {
+                LOGGER.log(Level.FINE, "Error refreshing customer details: " + t.getMessage());
+            }
+        });
+    }
+
+    private static synchronized void doRefreshCustomerDetails() {
         File targetFile = new File(BASE_DIR, "TABLE_CUSTOMER_DETAILS.txt");
         String sql = "SELECT " +
                 "u.id AS customer_id, " +
