@@ -292,21 +292,50 @@ public class BoatDAO extends AbstractDAO<Vessel> {
     }
 
     // ==========================================
-    // Member 3: DELETE
+    // Member 3: DELETE (Cascading & Safe Unlink)
     // ==========================================
     @Override
     public boolean delete(int id) {
         if (!db.isDatabaseAvailable()) {
             return FALLBACK_VESSELS.removeIf(v -> v.getId() != null && v.getId() == id);
         }
-        try {
-            boolean ok = super.delete(id);
-            if (ok) {
-                FALLBACK_VESSELS.removeIf(v -> v.getId() != null && v.getId() == id);
+        try (Connection conn = getConnection()) {
+            // 1. Unlink tour schedules (preserves timetable history without foreign key violation)
+            try (PreparedStatement stmt = conn.prepareStatement("UPDATE tour_schedules SET vessel_id = NULL WHERE vessel_id = ?")) {
+                stmt.setInt(1, id);
+                stmt.executeUpdate();
             }
-            return ok;
+            // 2. Remove associated safety check logs
+            try (PreparedStatement stmt = conn.prepareStatement("DELETE FROM safety_check_logs WHERE vessel_id = ?")) {
+                stmt.setInt(1, id);
+                stmt.executeUpdate();
+            }
+            // 3. Remove maintenance records & reminders
+            try (PreparedStatement stmt = conn.prepareStatement("DELETE FROM maintenance_records WHERE vessel_id = ?")) {
+                stmt.setInt(1, id);
+                stmt.executeUpdate();
+            }
+            try (PreparedStatement stmt = conn.prepareStatement("DELETE FROM service_reminders WHERE vessel_id = ?")) {
+                stmt.setInt(1, id);
+                stmt.executeUpdate();
+            }
+            // 4. Unlink emergency notices
+            try (PreparedStatement stmt = conn.prepareStatement("UPDATE emergency_notices SET affected_vessel_id = NULL WHERE affected_vessel_id = ?")) {
+                stmt.setInt(1, id);
+                stmt.executeUpdate();
+            }
+            // 5. Delete the vessel record
+            try (PreparedStatement stmt = conn.prepareStatement("DELETE FROM vessels WHERE id = ?")) {
+                stmt.setInt(1, id);
+                boolean ok = stmt.executeUpdate() > 0;
+                if (ok) {
+                    FALLBACK_VESSELS.removeIf(v -> v.getId() != null && v.getId() == id);
+                    com.boatsafari.common.util.LiveFileLogger.logTableUpdate("vessels", "DELETE", id, "Vessel #" + id + " deleted with cascading unlinks");
+                }
+                return ok;
+            }
         } catch (Exception e) {
-            logger.log(Level.WARNING, "Failed to delete vessel in DB: " + e.getMessage());
+            logger.log(Level.WARNING, "Failed to delete vessel in DB: " + e.getMessage(), e);
             return false;
         }
     }
