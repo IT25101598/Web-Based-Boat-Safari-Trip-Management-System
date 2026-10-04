@@ -125,7 +125,7 @@ GO
 CREATE TABLE dbo.tour_schedules (
     [id] INT IDENTITY(1,1) PRIMARY KEY,
     [tour_id] INT NOT NULL,
-    [vessel_id] INT NOT NULL,
+    [vessel_id] INT NULL,
     [captain_id] INT,
     [guide_id] INT,
     [departure_time] DATETIME2 NOT NULL,
